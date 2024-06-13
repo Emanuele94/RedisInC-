@@ -1,6 +1,6 @@
 ![alt text](../misc/img/RedisInC++.jpg)
 
-Schema del funzionamento Client-Server TCP
+## Schema del funzionamento Client-Server TCP
 Lato Server:
 
     Creazione del socket TCP:
@@ -24,7 +24,7 @@ Lato Server:
     Chiusura della connessione:
         Il server chiude il socket di connessione con il client usando close() quando la comunicazione è completa.
 
-Lato Client:
+## Lato Client:
 
     Creazione del socket TCP:
         Il client crea un socket TCP usando socket(AF_INET, SOCK_STREAM, 0);.
@@ -46,64 +46,3 @@ Lato Client:
 
     Chiusura della connessione:
         Il client chiude il socket usando close() dopo aver completato la comunicazione con il server.
-
-Schema:
-
-scss
-
-    +----------------+                     +----------------+
-    |     Server     |                     |     Client     |
-    +----------------+                     +----------------+
-           |                                       |
-           |        1. Creazione del socket         |
-           |     TCP con socket()                   |
-           |-------------------------------------->|
-           |                                       |
-           |        2. Impostazioni del socket      |
-           |       e setsockopt() per                |
-           |       SO_REUSEADDR                     |
-           |-------------------------------------->|
-           |                                       |
-           |        3. Binding dell'indirizzo       |
-           |       con bind()                       |
-           |-------------------------------------->|
-           |                                       |
-           |        4. Ascolto delle connessioni    |
-           |       con listen()                     |
-           |<--------------------------------------|
-           |                                       |
-           |        5. Accettazione della connessione|
-           |       con accept()                     |
-           |<--------------------------------------|
-           |                                       |
-           |        6. Comunicazione con il client   |
-           |                                       |
-           |          7. Chiusura della connessione  |
-           |          con close()                   |
-           |<--------------------------------------|
-           |                                       |
-           |                                       |
-           |        1. Creazione del socket         |
-           |       TCP con socket()                 |
-           |<--------------------------------------|
-           |                                       |
-           |        2. Configurazione dell'indirizzo|
-           |       del server                      |
-           |<--------------------------------------|
-           |                                       |
-           |        3. Connessione al server       |
-           |       con connect()                   |
-           |-------------------------------------->|
-           |                                       |
-           |        4. Invio dei dati al server     |
-           |       con write()                     |
-           |-------------------------------------->|
-           |                                       |
-           |        5. Lettura della risposta dal   |
-           |       server con read()                |
-           |<--------------------------------------|
-           |                                       |
-           |        6. Chiusura della connessione  |
-           |       con close()                     |
-           |-------------------------------------->|
-           |                                       |
