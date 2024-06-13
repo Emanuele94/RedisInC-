@@ -10,7 +10,8 @@ void die(const char *message) {
     exit(EXIT_FAILURE);
 }
 
-int main() {
+int main() 
+{
     int fd = socket(AF_INET, SOCK_STREAM, 0);  // Crea un socket TCP
     if (fd < 0) {
         die("socket()");

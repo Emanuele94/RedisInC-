@@ -1,3 +1,5 @@
+![alt text](../misc/img/RedisInC++.jpg)
+
 Schema del funzionamento Client-Server TCP
 Lato Server:
 
