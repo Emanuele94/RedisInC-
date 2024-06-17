@@ -4,6 +4,7 @@
 #include <unistd.h>
 #include <arpa/inet.h>
 #include <sys/socket.h>
+#include <assert.h>
 
 // Funzione per gestire errori fatali e terminare il programma
 void die(const char *message)
@@ -39,6 +40,33 @@ static void do_something(int connfd)
     }    
 }
 
+// Funzioni per leggere (read_full) e scrivere (write_full) per itero "n" byte del payload
+
+static int32_t read_full(int fd, char *buf, size_t n) { 
+    while (n > 0) { // fin quando n ha byte da leggere
+        ssize_t rv = read(fd, buf, n); // mentre la chiamata ha contenuto leggi fino all'ultimo byte di "n"
+        if (rv <= 0) {
+            return -1;  // error, or unexpected EOF
+        }
+        assert((size_t)rv <= n); // controlla se il numero di byte letti è <= di n
+        n -= (size_t)rv;    // sottrai il numero di byte letti dal file a n
+        buf += rv; // sposta il puntatore del buffer alla fine della lettura corrente
+    }
+    return 0;
+}
+
+static int32_t write_all(int fd, const char *buf, size_t n) {
+    while (n > 0) { // fin quando n ha byte da scrivere
+        ssize_t rv = write(fd, buf, n); // mentre la chiamata ha contenuto, scrivi fino all'ultimo byte di "n"
+        if (rv <= 0) {
+            return -1;  // error
+        }
+        assert((size_t)rv <= n); // sottrai il numero di byte letti dal file a n
+        n -= (size_t)rv; // sottrai il numero di byte scritt dal file a n 
+        buf += rv; // sposta il puntatore del buffer alla fine della scrittura corrente
+    }
+    return 0;
+}
 
 // Funzione principale del programma
 int main()
@@ -81,6 +109,13 @@ int main()
         {
             msg("accept() error"); // Gestisce l'errore
             continue; // Salta al prossimo ciclo del loop
+        }
+        
+        while (true) {
+            int32_t err = one_request(connfd);
+            if (err) {
+                break;
+            }
         }
 
         do_something(connfd); // Gestisce la logica di cosa fare con la connessione
