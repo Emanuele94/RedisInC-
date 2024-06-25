@@ -24,6 +24,10 @@ Lato Server:
     Chiusura della connessione:
         Il server chiude il socket di connessione con il client usando close() quando la comunicazione è completa.
 
+    Funzione one_request:
+
+        La funzione one_request gestisce un ciclo completo di richiesta e risposta con un client. Legge un messaggio dalla connessione, verifica eventuali errori, e se tutto è corretto, invia una risposta. La funzione assicura che il messaggio ricevuto non superi una dimensione massima predefinita e gestisce correttamente i casi di errore.    
+    
 ## Lato Client:
 
     Creazione del socket TCP:
