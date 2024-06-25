@@ -50,3 +50,15 @@ Lato Server:
 
     Chiusura della connessione:
         Il client chiude il socket usando close() dopo aver completato la comunicazione con il server.
+    
+    Funzione quey:
+        La funzione query effettua le seguenti operazioni:
+
+        Calcola la lunghezza del messaggio da inviare e verifica che non superi la dimensione massima.
+        Prepara un buffer che include la lunghezza del messaggio e il messaggio stesso.
+        Invia il buffer al server.
+        Riceve l'header della risposta dal server.
+        Verifica che la lunghezza della risposta non superi la dimensione massima.
+        Riceve il corpo della risposta dal server.
+        Termina la stringa di risposta e la stampa.
+   
