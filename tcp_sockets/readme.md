@@ -1,64 +1,108 @@
-![alt text](../misc/img/RedisInC++.jpg)
+![alt text](../misc/img/tcp_server-2024-06-28-155622.png)
 
-## Schema del funzionamento Client-Server TCP
-Lato Server:
+# Simple Non-blocking TCP Server
 
-    Creazione del socket TCP:
-        Il server crea un socket TCP usando socket(AF_INET, SOCK_STREAM, 0);.
+This project implements a simple non-blocking TCP server using C++. The server can handle multiple client connections simultaneously without blocking, using the `poll` system call.
 
-    Configurazione del socket:
-        Il server imposta l'opzione SO_REUSEADDR per consentire il riutilizzo dell'indirizzo e della porta subito dopo la chiusura del socket usando setsockopt().
+## Features
 
-    Binding dell'indirizzo:
-        Il server associa l'indirizzo e la porta al socket usando bind().
+- Non-blocking I/O for handling multiple connections.
+- Supports basic request and response communication.
+- Manages connections using a state machine.
 
-    Ascolto delle connessioni in ingresso:
-        Il server entra in modalità di ascolto usando listen() per accettare le connessioni in ingresso.
+## Requirements
 
-    Accettazione delle connessioni:
-        Il server accetta le connessioni in entrata usando accept(), creando un nuovo socket per gestire la comunicazione con il client.
+- C++ compiler (supporting C++11 or later)
+- POSIX-compliant operating system (Linux, macOS)
 
-    Comunicazione con il client:
-        Il server legge i dati inviati dal client usando read() e invia la risposta usando write().
+## Building the Project
 
-    Chiusura della connessione:
-        Il server chiude il socket di connessione con il client usando close() quando la comunicazione è completa.
+To build the project, compile the source file with a C++ compiler. For example:
 
-    Funzione one_request:
+```sh
+g++ -o server server.cpp
+```
 
-        La funzione one_request gestisce un ciclo completo di richiesta e risposta con un client. Legge un messaggio dalla connessione, verifica eventuali errori, e se tutto è corretto, invia una risposta. La funzione assicura che il messaggio ricevuto non superi una dimensione massima predefinita e gestisce correttamente i casi di errore.    
-    
-## Lato Client:
+## Running the Server
 
-    Creazione del socket TCP:
-        Il client crea un socket TCP usando socket(AF_INET, SOCK_STREAM, 0);.
+Run the compiled server executable. The server listens on port 1234.
 
-    Configurazione dell'indirizzo del server:
-        Il client configura l'indirizzo del server a cui connettersi:
-            Famiglia di indirizzi (AF_INET).
-            Porta del server in network byte order usando htons().
-            Indirizzo IP del server usando htonl() per convertire l'indirizzo in formato network byte order.
+```sh
+./server
+```
 
-    Connessione al server:
-        Il client si connette al server usando connect() specificando l'indirizzo del server.
+## Code Overview
 
-    Invio dei dati al server:
-        Il client invia i dati al server usando write().
+### Includes and Constants
 
-    Lettura della risposta dal server:
-        Il client legge la risposta dal server usando read().
+```cpp
+#include <assert.h>
+#include <stdint.h>
+#include <stdlib.h>
+#include <string.h>
+#include <stdio.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <poll.h>
+#include <unistd.h>
+#include <arpa/inet.h>
+#include <sys/socket.h>
+#include <netinet/ip.h>
+#include <vector>
 
-    Chiusura della connessione:
-        Il client chiude il socket usando close() dopo aver completato la comunicazione con il server.
-    
-    Funzione quey:
-        La funzione query effettua le seguenti operazioni:
+const size_t k_max_msg = 4096;
+```
 
-        Calcola la lunghezza del messaggio da inviare e verifica che non superi la dimensione massima.
-        Prepara un buffer che include la lunghezza del messaggio e il messaggio stesso.
-        Invia il buffer al server.
-        Riceve l'header della risposta dal server.
-        Verifica che la lunghezza della risposta non superi la dimensione massima.
-        Riceve il corpo della risposta dal server.
-        Termina la stringa di risposta e la stampa.
-   
+### Connection Structure and States
+
+```cpp
+enum {
+    STATE_REQ = 0,
+    STATE_RES = 1,
+    STATE_END = 2,
+};
+
+struct Conn {
+    int fd = -1;
+    uint32_t state = 0;
+    size_t rbuf_size = 0;
+    uint8_t rbuf[4 + k_max_msg];
+    size_t wbuf_size = 0;
+    size_t wbuf_sent = 0;
+    uint8_t wbuf[4 + k_max_msg];
+};
+```
+
+### Utility Functions
+
+```cpp
+static void msg(const char *msg);
+static void die(const char *msg);
+static void fd_set_nb(int fd);
+```
+
+### Connection Handling Functions
+
+```cpp
+static void conn_put(std::vector<Conn *> &fd2conn, struct Conn *conn);
+static int32_t accept_new_conn(std::vector<Conn *> &fd2conn, int fd);
+static void state_req(Conn *conn);
+static void state_res(Conn *conn);
+static bool try_one_request(Conn *conn);
+static bool try_fill_buffer(Conn *conn);
+static bool try_flush_buffer(Conn *conn);
+static void connection_io(Conn *conn);
+```
+
+### Main Function
+
+```cpp
+int main();
+```
+
+## Detailed Explanation
+
+1. **Initialization**: The server socket is created, configured to be non-blocking, and bound to a port.
+2. **Event Loop**: Uses `poll` to wait for events on the server socket and client connections.
+3. **Connection Handling**: Accepts new connections and processes incoming requests and outgoing responses.
+4. **State Management**: Manages connection states (request, response, end) using a state machine.

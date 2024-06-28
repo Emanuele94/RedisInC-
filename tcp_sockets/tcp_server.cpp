@@ -1,151 +1,284 @@
-#include <stdio.h>
+#include <assert.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdio.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <poll.h>
 #include <unistd.h>
 #include <arpa/inet.h>
 #include <sys/socket.h>
-#include <assert.h>
-#include <errno.h>
+#include <netinet/ip.h>
+#include <vector>
 
-// Funzione per gestire errori fatali e terminare il programma
-void die(const char *message) {
-    perror(message);    // Stampa il messaggio di errore specificato con un testo aggiuntivo
-    exit(EXIT_FAILURE); // Termina il programma con stato di errore
-}
-
-// Funzione per gestire messaggi di errore
-void msg(const char *message) {
-    perror(message); // Stampa il messaggio di errore specificato
-}
-
-// Funzione per leggere completamente n byte dal file descriptor fd in buf
-static int32_t read_full(int fd, char *buf, size_t n) {
-    while (n > 0) {
-        ssize_t rv = read(fd, buf, n); // Legge fino a n byte dal socket
-        if (rv <= 0) {
-            return -1; // errore, o EOF inaspettato
-        }
-        assert((size_t)rv <= n); // Verifica che il numero di byte letti sia <= n
-        n -= (size_t)rv;         // Aggiorna n con i byte rimanenti da leggere
-        buf += rv;               // Sposta il puntatore del buffer oltre i byte letti
-    }
-    return 0;
-}
-
-// Funzione per scrivere completamente n byte da buf al file descriptor fd
-static int32_t write_all(int fd, const char *buf, size_t n) {
-    while (n > 0) {
-        ssize_t rv = write(fd, buf, n); // Scrive fino a n byte sul socket
-        if (rv <= 0) {
-            return -1; // errore
-        }
-        assert((size_t)rv <= n); // Verifica che il numero di byte scritti sia <= n
-        n -= (size_t)rv;         // Aggiorna n con i byte rimanenti da scrivere
-        buf += rv;               // Sposta il puntatore del buffer oltre i byte scritti
-    }
-    return 0;
-}
-
-// Costante per la dimensione massima del messaggio
+// Definizione della dimensione massima del messaggio
 const size_t k_max_msg = 4096;
 
-// Funzione per gestire una singola richiesta dal client
-static int32_t one_request(int connfd) {
-    // Buffer per l'header (4 byte) e il corpo del messaggio più un byte nullo
-    char rbuf[4 + k_max_msg + 1];
-    errno = 0; // Azzera errno per rilevare eventuali errori
+// Definizione degli stati della connessione
+enum {
+    STATE_REQ = 0, // Stato di richiesta
+    STATE_RES = 1, // Stato di risposta
+    STATE_END = 2, // Stato di chiusura della connessione
+};
 
-    // Legge i primi 4 byte (header) dalla connessione e li memorizza in rbuf
-    int32_t err = read_full(connfd, rbuf, 4);
-    if (err) {
-        // Se c'è un errore nella lettura, controlla errno per determinare il tipo di errore
-        if (errno == 0) {
-            msg("EOF"); // Fine del file, nessun dato più da leggere
-        } else {
-            msg("read() error"); // Errore nella lettura
-        }
-        return err; // Ritorna l'errore
-    }
+// Struttura per gestire le connessioni
+struct Conn {
+    int fd = -1;            // File descriptor della connessione
+    uint32_t state = 0;     // Stato della connessione
+    size_t rbuf_size = 0;   // Dimensione del buffer di lettura
+    uint8_t rbuf[4 + k_max_msg]; // Buffer di lettura
+    size_t wbuf_size = 0;   // Dimensione del buffer di scrittura
+    size_t wbuf_sent = 0;   // Numero di byte già inviati
+    uint8_t wbuf[4 + k_max_msg]; // Buffer di scrittura
+};
 
-    uint32_t len = 0;      // Variabile per memorizzare la lunghezza del messaggio
-    memcpy(&len, rbuf, 4); // Copia i primi 4 byte di rbuf in len, assumendo little endian
-    if (len > k_max_msg) {
-        msg("too long"); // Se il messaggio è troppo lungo, stampa un messaggio di errore
-        return -1;       // Ritorna -1 per indicare un errore
-    }
-
-    // Legge il corpo del messaggio dalla connessione e lo memorizza in rbuf a partire dal 5° byte
-    err = read_full(connfd, &rbuf[4], len);
-    if (err) {
-        msg("read() error"); // Se c'è un errore nella lettura, stampa un messaggio di errore
-        return err;          // Ritorna l'errore
-    }
-
-    // Aggiunge un carattere nullo alla fine del messaggio per renderlo una stringa C valida
-    rbuf[4 + len] = '\0';
-    // Stampa il messaggio ricevuto dal client
-    printf("client says: %s\n", &rbuf[4]);
-
-    // Prepara una risposta usando lo stesso protocollo
-    const char reply[] = "world";  // Messaggio di risposta
-    char wbuf[4 + sizeof(reply)];  // Buffer per contenere l'header e la risposta
-    len = (uint32_t)strlen(reply); // Calcola la lunghezza della risposta
-    memcpy(wbuf, &len, 4);         // Copia la lunghezza della risposta nei primi 4 byte di wbuf
-    memcpy(&wbuf[4], reply, len);  // Copia la risposta nei byte successivi di wbuf
-
-    // Invia la risposta al client
-    return write_all(connfd, wbuf, 4 + len);
+// Funzione per stampare messaggi di errore
+static void msg(const char *msg) {
+    fprintf(stderr, "%s\n", msg);
 }
 
-// Funzione principale del programma
+// Funzione per terminare il programma in caso di errore critico
+static void die(const char *msg) {
+    int err = errno;
+    fprintf(stderr, "[%d] %s\n", err, msg);
+    abort();
+}
+
+// Funzione per impostare un file descriptor in modalità non bloccante
+static void fd_set_nb(int fd) {
+    errno = 0;
+    int flags = fcntl(fd, F_GETFL, 0); // Ottiene i flag del file descriptor
+    if (errno) {
+        die("fcntl error");
+        return;
+    }
+
+    flags |= O_NONBLOCK; // Aggiunge il flag di non bloccaggio
+
+    errno = 0;
+    (void)fcntl(fd, F_SETFL, flags); // Imposta i nuovi flag
+    if (errno) {
+        die("fcntl error");
+    }
+}
+
+// Funzione per inserire una connessione nella lista di connessioni
+static void conn_put(std::vector<Conn *> &fd2conn, struct Conn *conn) {
+    if (fd2conn.size() <= (size_t)conn->fd) {
+        fd2conn.resize(conn->fd + 1); // Ridimensiona il vettore se necessario
+    }
+    fd2conn[conn->fd] = conn; // Inserisce la connessione nel vettore
+}
+
+// Funzione per accettare nuove connessioni
+static int32_t accept_new_conn(std::vector<Conn *> &fd2conn, int fd) {
+    struct sockaddr_in client_addr = {}; // Struttura per l'indirizzo del client
+    socklen_t socklen = sizeof(client_addr);
+    int connfd = accept(fd, (struct sockaddr *)&client_addr, &socklen); // Accetta la connessione
+    if (connfd < 0) {
+        msg("accept() error");
+        return -1;
+    }
+
+    fd_set_nb(connfd); // Imposta la connessione in modalità non bloccante
+    struct Conn *conn = (struct Conn *)malloc(sizeof(struct Conn)); // Alloca memoria per la nuova connessione
+    if (!conn) {
+        close(connfd);
+        return -1;
+    }
+    conn->fd = connfd; // Imposta il file descriptor della connessione
+    conn->state = STATE_REQ; // Imposta lo stato della connessione a richiesta
+    conn->rbuf_size = 0; // Inizializza la dimensione del buffer di lettura
+    conn->wbuf_size = 0; // Inizializza la dimensione del buffer di scrittura
+    conn->wbuf_sent = 0; // Inizializza il contatore dei byte inviati
+    conn_put(fd2conn, conn); // Inserisce la connessione nel vettore
+    return 0;
+}
+
+// Prototipi delle funzioni per gestire gli stati
+static void state_req(Conn *conn);
+static void state_res(Conn *conn);
+
+// Funzione per gestire una singola richiesta
+static bool try_one_request(Conn *conn) {
+    if (conn->rbuf_size < 4) {
+        return false;
+    }
+    uint32_t len = 0;
+    memcpy(&len, &conn->rbuf[0], 4); // Copia la lunghezza del messaggio
+    if (len > k_max_msg) {
+        msg("too long");
+        conn->state = STATE_END; // Imposta lo stato a END se il messaggio è troppo lungo
+        return false;
+    }
+    if (4 + len > conn->rbuf_size) {
+        return false;
+    }
+
+    printf("client says: %.*s\n", len, &conn->rbuf[4]); // Stampa il messaggio del client
+
+    memcpy(&conn->wbuf[0], &len, 4); // Prepara la risposta
+    memcpy(&conn->wbuf[4], &conn->rbuf[4], len); // Copia i dati del messaggio nel buffer di scrittura
+    conn->wbuf_size = 4 + len; // Imposta la dimensione del buffer di scrittura
+
+    size_t remain = conn->rbuf_size - 4 - len; // Calcola i byte rimanenti nel buffer di lettura
+    if (remain) {
+        memmove(conn->rbuf, &conn->rbuf[4 + len], remain); // Sposta i byte rimanenti all'inizio del buffer
+    }
+    conn->rbuf_size = remain; // Aggiorna la dimensione del buffer di lettura
+
+    conn->state = STATE_RES; // Imposta lo stato a RES
+    state_res(conn); // Gestisce lo stato di risposta
+
+    return (conn->state == STATE_REQ); // Ritorna true se lo stato è tornato a REQ
+}
+
+// Funzione per riempire il buffer di lettura
+static bool try_fill_buffer(Conn *conn) {
+    assert(conn->rbuf_size < sizeof(conn->rbuf));
+    ssize_t rv = 0;
+    do {
+        size_t cap = sizeof(conn->rbuf) - conn->rbuf_size; // Calcola la capacità rimanente del buffer
+        rv = read(conn->fd, &conn->rbuf[conn->rbuf_size], cap); // Legge dati dal file descriptor
+    } while (rv < 0 && errno == EINTR); // Riprova se l'errore è EINTR
+    if (rv < 0 && errno == EAGAIN) {
+        return false;
+    }
+    if (rv < 0) {
+        msg("read() error");
+        conn->state = STATE_END; // Imposta lo stato a END se c'è un errore di lettura
+        return false;
+    }
+    if (rv == 0) {
+        if (conn->rbuf_size > 0) {
+            msg("unexpected EOF");
+        } else {
+            msg("EOF");
+        }
+        conn->state = STATE_END; // Imposta lo stato a END se il client chiude la connessione
+        return false;
+    }
+
+    conn->rbuf_size += (size_t)rv; // Aggiorna la dimensione del buffer di lettura
+    assert(conn->rbuf_size <= sizeof(conn->rbuf));
+
+    while (try_one_request(conn)) {} // Gestisce le richieste finché ce ne sono nel buffer
+    return (conn->state == STATE_REQ); // Ritorna true se lo stato è REQ
+}
+
+// Funzione per gestire lo stato di richiesta
+static void state_req(Conn *conn) {
+    while (try_fill_buffer(conn)) {} // Riempie il buffer finché ce ne sono dati disponibili
+}
+
+// Funzione per svuotare il buffer di scrittura
+static bool try_flush_buffer(Conn *conn) {
+    ssize_t rv = 0;
+    do {
+        size_t remain = conn->wbuf_size - conn->wbuf_sent; // Calcola i byte rimanenti nel buffer di scrittura
+        rv = write(conn->fd, &conn->wbuf[conn->wbuf_sent], remain); // Scrive i dati nel file descriptor
+    } while (rv < 0 && errno == EINTR); // Riprova se l'errore è EINTR
+    if (rv < 0 && errno == EAGAIN) {
+        return false;
+    }
+    if (rv < 0) {
+        msg("write() error");
+        conn->state = STATE_END; // Imposta lo stato a END se c'è un errore di scrittura
+        return false;
+    }
+    conn->wbuf_sent += (size_t)rv; // Aggiorna il contatore dei byte inviati
+    assert(conn->wbuf_sent <= conn->wbuf_size);
+    if (conn->wbuf_sent == conn->wbuf_size) {
+        conn->state = STATE_REQ; // Imposta lo stato a REQ se tutti i dati sono stati inviati
+        conn->wbuf_sent = 0;
+        conn->wbuf_size = 0;
+        return false;
+    }
+    return true;
+}
+
+// Funzione per gestire lo stato di risposta
+static void state_res(Conn *conn) {
+    while (try_flush_buffer(conn)) {} // Svuota il buffer finché ce ne sono dati da inviare
+}
+
+// Funzione per gestire l'I/O delle connessioni
+static void connection_io(Conn *conn) {
+    if (conn->state == STATE_REQ) {
+        state_req(conn); // Gestisce lo stato di richiesta
+    } else if (conn->state == STATE_RES) {
+        state_res(conn); // Gestisce lo stato di risposta
+    } else {
+        assert(0); // Se lo stato è sconosciuto, genera un'asserzione
+    }
+}
+
+// Funzione principale
 int main() {
     int fd = socket(AF_INET, SOCK_STREAM, 0); // Crea un socket TCP
-    if (fd < 0) {                             // Se la creazione del socket fallisce
-        die("socket()");                      // Gestisce l'errore
+    if (fd < 0) {
+        die("socket()");
     }
 
-    // Imposta l'opzione SO_REUSEADDR per riutilizzare l'indirizzo IP e la porta subito dopo la chiusura del socket
     int val = 1;
-    if (setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &val, sizeof(val)) < 0) {
-        die("setsockopt()"); // Gestisce l'errore se l'impostazione fallisce
+    setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &val, sizeof(val)); // Imposta l'opzione SO_REUSEADDR
+
+    struct sockaddr_in addr = {};
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(1234); // Imposta la porta
+    addr.sin_addr.s_addr = htonl(INADDR_ANY); // Imposta l'indirizzo IP
+    int rv = bind(fd, (const sockaddr *)&addr, sizeof(addr)); // Associa il socket all'indirizzo e porta
+    if (rv) {
+        die("bind()");
     }
 
-    struct sockaddr_in addr = {};                  // Struttura per l'indirizzo del server
-    addr.sin_family = AF_INET;                     // Famiglia di indirizzi IPv4
-    addr.sin_port = htons(1234);                   // Porta del server in network byte order (big-endian)
-    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK); // Indirizzo IP del server (localhost, 127.0.0.1)
-
-    // Collega il socket all'indirizzo specificato
-    if (bind(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
-        die("bind()"); // Gestisce l'errore se il binding fallisce
+    rv = listen(fd, SOMAXCONN); // Mette il socket in ascolto per connessioni in ingresso
+    if (rv) {
+        die("listen()");
     }
 
-    // Mette il socket in modalità di ascolto per connessioni in ingresso
-    if (listen(fd, SOMAXCONN) < 0) {
-        die("listen()"); // Gestisce l'errore se il listen fallisce
-    }
+    std::vector<Conn *> fd2conn; // Vettore per mappare file descriptor alle connessioni
+    fd_set_nb(fd); // Imposta il socket in modalità non bloccante
 
-    while (1) {
-        // Accetta una connessione in entrata
-        struct sockaddr_in client_addr = {};                                // Struttura per l'indirizzo del client
-        socklen_t addrlen = sizeof(client_addr);                            // Lunghezza della struttura dell'indirizzo del client
-        int connfd = accept(fd, (struct sockaddr *)&client_addr, &addrlen); // Accetta una connessione in entrata
-        if (connfd < 0) {                                                   // Se l'accettazione della connessione fallisce
-            msg("accept() error"); // Gestisce l'errore
-            continue;              // Salta al prossimo ciclo del loop
+    std::vector<struct pollfd> poll_args; // Vettore per gli argomenti di poll
+    while (true) {
+        poll_args.clear();
+        struct pollfd pfd = {fd, POLLIN, 0};
+        poll_args.push_back(pfd); // Aggiunge il socket del server a poll_args
+
+        for (Conn *conn : fd2conn) {
+            if (!conn) {
+                continue;
+            }
+            struct pollfd pfd = {};
+            pfd.fd = conn->fd;
+            pfd.events = (conn->state == STATE_REQ) ? POLLIN : POLLOUT; // Imposta l'evento per poll
+            pfd.events = pfd.events | POLLERR; // Aggiunge l'evento di errore
+            poll_args.push_back(pfd); // Aggiunge il file descriptor del client a poll_args
         }
 
-        // Gestisce tutte le richieste del client finché la connessione è attiva
-        while (1) {
-            int32_t err = one_request(connfd);
-            if (err) {
-                break; // Esce dal loop se c'è un errore
+        int rv = poll(poll_args.data(), (nfds_t)poll_args.size(), 1000); // Attende gli eventi
+        if (rv < 0) {
+            die("poll()");
+        }
+
+        for (size_t i = 1; i < poll_args.size(); ++i) {
+            if (poll_args[i].revents) {
+                Conn *conn = fd2conn[poll_args[i].fd];
+                connection_io(conn); // Gestisce l'I/O della connessione
+                if (conn->state == STATE_END) {
+                    fd2conn[conn->fd] = NULL;
+                    (void)close(conn->fd); // Chiude la connessione
+                    free(conn); // Libera la memoria della connessione
+                }
             }
         }
 
-        close(connfd); // Chiude il socket della connessione
+        if (poll_args[0].revents) {
+            (void)accept_new_conn(fd2conn, fd); // Accetta una nuova connessione
+        }
     }
 
-    close(fd); // Chiude il socket principale del server
-    return 0;  // Termina il programma con successo
+    return 0;
 }
