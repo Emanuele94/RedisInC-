@@ -1,4 +1,4 @@
-![alt text](../misc/img/tcp_server-2024-06-28-155622.png)
+![alt text](./misc/img/tcp_server-2024-06-28-155622.png)
 
 # Simple Non-blocking TCP Server
 
