@@ -1,158 +1,145 @@
-#include <assert.h>
-#include <stdint.h>
-#include <stdlib.h>
-#include <string.h>
-#include <stdio.h>
-#include <errno.h>
-#include <unistd.h>
-#include <arpa/inet.h>
-#include <sys/socket.h>
-#include <netinet/ip.h>
+#include <assert.h> // Libreria per assert
+#include <stdint.h> // Libreria per tipi di dati interi a lunghezza fissa
+#include <stdlib.h> // Libreria per funzioni di utilità generale
+#include <string.h> // Libreria per funzioni di manipolazione delle stringhe
+#include <stdio.h> // Libreria per input/output
+#include <errno.h> // Libreria per gestione degli errori
+#include <unistd.h> // Libreria per funzioni POSIX
+#include <arpa/inet.h> // Libreria per funzioni di conversione di indirizzi di rete
+#include <sys/socket.h> // Libreria per funzioni di gestione dei socket
+#include <netinet/ip.h> // Libreria per strutture e funzioni di protocollo IP
+#include <string> // Libreria per la classe string di C++
+#include <vector> // Libreria per il contenitore vector di C++
 
-// Funzione per gestire errori fatali e terminare il programma
-void die(const char *message) {
-    perror(message);    // Stampa il messaggio di errore specificato con un testo aggiuntivo
-    exit(EXIT_FAILURE); // Termina il programma con stato di errore
-}
-
-// Funzione per stampare un messaggio di errore
 static void msg(const char *msg) {
-    fprintf(stderr, "%s\n", msg); // Stampa il messaggio di errore su stderr
+    fprintf(stderr, "%s\n", msg); // Stampa un messaggio di errore su stderr
 }
 
-// Funzione per leggere completamente n byte dal file descriptor fd in buf
+static void die(const char *msg) {
+    int err = errno; // Ottiene il valore di errno
+    fprintf(stderr, "[%d] %s\n", err, msg); // Stampa il messaggio di errore con il valore di errno
+    abort(); // Termina il programma
+}
+
 static int32_t read_full(int fd, char *buf, size_t n) {
     while (n > 0) {
-        ssize_t rv = read(fd, buf, n); // Legge fino a n byte dal socket
+        ssize_t rv = read(fd, buf, n); // Legge dal file descriptor
         if (rv <= 0) {
-            return -1;  // Errore, o EOF inaspettato
+            return -1; // Errore o EOF inaspettato
         }
-        assert((size_t)rv <= n); // Verifica che il numero di byte letti sia <= n
-        n -= (size_t)rv;         // Aggiorna n con i byte rimanenti da leggere
-        buf += rv;               // Sposta il puntatore del buffer oltre i byte letti
+        assert((size_t)rv <= n); // Verifica che rv non sia maggiore di n
+        n -= (size_t)rv; // Riduce n del numero di byte letti
+        buf += rv; // Avanza il puntatore del buffer
     }
-    return 0;
+    return 0; // Successo
 }
 
-// Funzione per scrivere completamente n byte da buf al file descriptor fd
 static int32_t write_all(int fd, const char *buf, size_t n) {
     while (n > 0) {
-        ssize_t rv = write(fd, buf, n); // Scrive fino a n byte sul socket
+        ssize_t rv = write(fd, buf, n); // Scrive sul file descriptor
         if (rv <= 0) {
-            return -1;  // Errore
+            return -1; // Errore
         }
-        assert((size_t)rv <= n); // Verifica che il numero di byte scritti sia <= n
-        n -= (size_t)rv;         // Aggiorna n con i byte rimanenti da scrivere
-        buf += rv;               // Sposta il puntatore del buffer oltre i byte scritti
+        assert((size_t)rv <= n); // Verifica che rv non sia maggiore di n
+        n -= (size_t)rv; // Riduce n del numero di byte scritti
+        buf += rv; // Avanza il puntatore del buffer
     }
-    return 0;
+    return 0; // Successo
 }
 
-const size_t k_max_msg = 4096; // Costante per la dimensione massima del messaggio
+const size_t k_max_msg = 4096; // Dimensione massima del messaggio
 
-// Funzione per inviare una richiesta al server e gestire la risposta
-static int32_t query(int fd, const char *text) {
-    uint32_t len = (uint32_t)strlen(text); // Calcola la lunghezza del messaggio
+static int32_t send_req(int fd, const std::vector<std::string> &cmd) {
+    uint32_t len = 4;
+    for (const std::string &s : cmd) {
+        len += 4 + s.size(); // Calcola la lunghezza totale del messaggio
+    }
     if (len > k_max_msg) {
-        return -1;  // Messaggio troppo lungo, gestisce l'errore
+        return -1; // Errore se il messaggio è troppo lungo
     }
 
-    char wbuf[4 + k_max_msg]; // Buffer per l'header (4 byte) e il corpo del messaggio
-    memcpy(wbuf, &len, 4);    // Copia la lunghezza del messaggio nell'header (assume little endian)
-    memcpy(&wbuf[4], text, len); // Copia il messaggio nel buffer dopo l'header
-
-    if (int32_t err = write_all(fd, wbuf, 4 + len)) {
-        return err; // Gestisce eventuali errori durante la scrittura
+    char wbuf[4 + k_max_msg];
+    memcpy(&wbuf[0], &len, 4); // Copia la lunghezza del messaggio nel buffer
+    uint32_t n = cmd.size();
+    memcpy(&wbuf[4], &n, 4); // Copia il numero di stringhe nel buffer
+    size_t cur = 8;
+    for (const std::string &s : cmd) {
+        uint32_t p = (uint32_t)s.size();
+        memcpy(&wbuf[cur], &p, 4); // Copia la lunghezza della stringa nel buffer
+        memcpy(&wbuf[cur + 4], s.data(), s.size()); // Copia la stringa nel buffer
+        cur += 4 + s.size(); // Avanza il puntatore del buffer
     }
+    return write_all(fd, wbuf, 4 + len); // Invia il buffer sul file descriptor
+}
 
-    // Buffer per la risposta, 4 byte per l'header e k_max_msg per il corpo del messaggio
+static int32_t read_res(int fd) {
+    // 4 bytes header
     char rbuf[4 + k_max_msg + 1];
-    errno = 0; // Azzera errno per rilevare eventuali errori
-
-    // Legge l'header (4 byte) dalla connessione
-    int32_t err = read_full(fd, rbuf, 4);
+    errno = 0;
+    int32_t err = read_full(fd, rbuf, 4); // Legge l'header della risposta
     if (err) {
         if (errno == 0) {
-            msg("EOF"); // Fine del file, nessun dato più da leggere
+            msg("EOF");
         } else {
-            msg("read() error"); // Errore nella lettura
+            msg("read() error");
         }
-        return err; // Ritorna l'errore
+        return err;
     }
 
-    memcpy(&len, rbuf, 4); // Copia la lunghezza del messaggio dall'header (assume little endian)
+    uint32_t len = 0;
+    memcpy(&len, rbuf, 4); // Copia la lunghezza della risposta
     if (len > k_max_msg) {
-        msg("too long"); // Se il messaggio è troppo lungo, stampa un messaggio di errore
-        return -1;       // Ritorna -1 per indicare un errore
+        msg("too long");
+        return -1; // Errore se la risposta è troppo lunga
     }
 
-    // Legge il corpo della risposta (lungo len byte) dalla connessione
-    err = read_full(fd, &rbuf[4], len);
+    // reply body
+    err = read_full(fd, &rbuf[4], len); // Legge il corpo della risposta
     if (err) {
-        msg("read() error"); // Errore nella lettura del corpo della risposta
-        return err;          // Ritorna l'errore
+        msg("read() error");
+        return err;
     }
 
-    rbuf[4 + len] = '\0'; // Aggiunge un terminatore nullo per trattare il buffer come stringa C
-
-    if (strlen(&rbuf[4]) > 0) {
-        printf("server says: %s\n", &rbuf[4]); // Stampa la risposta ricevuta dal server
+    // print the result
+    uint32_t rescode = 0;
+    if (len < 4) {
+        msg("bad response");
+        return -1; // Errore se la risposta è troppo corta
     }
-
-    return 0; // Operazione completata con successo
+    memcpy(&rescode, &rbuf[4], 4); // Copia il codice di risposta
+    printf("server says: [%u] %.*s\n", rescode, len - 4, &rbuf[8]); // Stampa il codice di risposta e il messaggio
+    return 0; // Successo
 }
 
-int main() {
-    int fd = socket(AF_INET, SOCK_STREAM, 0); // Crea un socket TCP
+int main(int argc, char **argv) {
+    int fd = socket(AF_INET, SOCK_STREAM, 0); // Crea un socket
     if (fd < 0) {
-        die("socket()"); // Gestisce l'errore se la creazione del socket fallisce
+        die("socket()");
     }
 
-    struct sockaddr_in addr = {}; // Struttura per l'indirizzo del server
-    addr.sin_family = AF_INET;    // Famiglia di indirizzi IPv4
-    addr.sin_port = htons(1234);  // Porta del server in network byte order (big-endian)
-    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK); // Indirizzo IP del server (localhost, 127.0.0.1)
-
-    int rv = connect(fd, (const struct sockaddr *)&addr, sizeof(addr)); // Connette al server
-    if (rv < 0) {
-        die("connect"); // Gestisce l'errore se la connessione fallisce
+    struct sockaddr_in addr = {};
+    addr.sin_family = AF_INET;
+    addr.sin_port = ntohs(1234); // Imposta la porta
+    addr.sin_addr.s_addr = ntohl(INADDR_LOOPBACK); // Imposta l'indirizzo IP (127.0.0.1)
+    int rv = connect(fd, (const struct sockaddr *)&addr, sizeof(addr)); // Connette il socket all'indirizzo
+    if (rv) {
+        die("connect");
     }
 
-    // Ottiene l'indirizzo del peer remoto (server) usando getpeername
-    struct sockaddr_in peer_addr; // Struttura per memorizzare l'indirizzo del peer remoto
-    socklen_t peer_addr_len = sizeof(peer_addr); // Lunghezza della struttura dell'indirizzo del peer
-    if (getpeername(fd, (struct sockaddr *)&peer_addr, &peer_addr_len) < 0) {
-        die("getpeername"); // Gestisce l'errore se getpeername fallisce
+    std::vector<std::string> cmd;
+    for (int i = 1; i < argc; ++i) {
+        cmd.push_back(argv[i]); // Costruisce il comando dal vettore di argomenti
     }
-    char peer_ip[INET_ADDRSTRLEN]; // Buffer per memorizzare l'indirizzo IP del peer in formato stringa
-    inet_ntop(AF_INET, &peer_addr.sin_addr, peer_ip, sizeof(peer_ip)); // Converte l'indirizzo IP in formato stringa
-    printf("Connected to server at %s:%d\n", peer_ip, ntohs(peer_addr.sin_port)); // Stampa l'indirizzo IP e la porta del peer
-
-    // Ottiene l'indirizzo locale del socket usando getsockname
-    struct sockaddr_in local_addr; // Struttura per memorizzare l'indirizzo locale del socket
-    socklen_t local_addr_len = sizeof(local_addr); // Lunghezza della struttura dell'indirizzo locale
-    if (getsockname(fd, (struct sockaddr *)&local_addr, &local_addr_len) < 0) {
-        die("getsockname"); // Gestisce l'errore se getsockname fallisce
-    }
-    char local_ip[INET_ADDRSTRLEN]; // Buffer per memorizzare l'indirizzo IP locale in formato stringa
-    inet_ntop(AF_INET, &local_addr.sin_addr, local_ip, sizeof(local_ip)); // Converte l'indirizzo IP in formato stringa
-    printf("Local socket address is %s:%d\n", local_ip, ntohs(local_addr.sin_port)); // Stampa l'indirizzo IP locale e la porta
-
-    // Esegue più richieste al server
-    int32_t err = query(fd, "hello1");
+    int32_t err = send_req(fd, cmd); // Invia la richiesta
     if (err) {
-        goto L_DONE; // Salta alla fine se c'è un errore
+        goto L_DONE;
     }
-    err = query(fd, "hello2");
+    err = read_res(fd); // Legge la risposta
     if (err) {
-        goto L_DONE; // Salta alla fine se c'è un errore
-    }
-    err = query(fd, "hello3");
-    if (err) {
-        goto L_DONE; // Salta alla fine se c'è un errore
+        goto L_DONE;
     }
 
 L_DONE:
     close(fd); // Chiude il socket
-    return 0;  // Termina il programma con successo
+    return 0; // Termina il programma
 }
